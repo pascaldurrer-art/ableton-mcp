@@ -29,7 +29,7 @@ class AbletonMCP(ControlSurface):
     def __init__(self, c_instance):
         """Initialize the control surface"""
         ControlSurface.__init__(self, c_instance)
-        self.log_message("AbletonMCP Remote Script initializing...")
+        self.log_message("### PASCAL CUSTOM REMOTE SCRIPT ###")
         
         # Socket server for communication
         self.server = None
@@ -438,13 +438,18 @@ class AbletonMCP(ControlSurface):
             # Get devices
             devices = []
             for device_index, device in enumerate(track.devices):
+                try:
+                    parameter_count = len(device.parameters)
+                except Exception as e:
+                    parameter_count = "ERROR: " + str(e)
+
                 devices.append({
                     "index": device_index,
                     "name": device.name,
                     "class_name": device.class_name,
-                    "type": self._get_device_type(device)
+                    "type": self._get_device_type(device),
+                    "parameter_count": parameter_count
                 })
-            
             result = {
                 "index": track_index,
                 "name": track.name,
