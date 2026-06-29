@@ -372,7 +372,8 @@ class AbletonMCP(ControlSurface):
             # Add the new browser commands
             elif command_type == "get_browser_tree":
                 category_type = params.get("category_type", "all")
-                response["result"] = self.get_browser_tree(category_type)
+                max_depth     = int(params.get("max_depth", 2))
+                response["result"] = self.get_browser_tree(category_type, max_depth)
             elif command_type == "get_browser_items_at_path":
                 path = params.get("path", "")
                 response["result"] = self.get_browser_items_at_path(path)
@@ -1429,13 +1430,14 @@ class AbletonMCP(ControlSurface):
         except:
             return "unknown"
     
-    def get_browser_tree(self, category_type="all"):
+    def get_browser_tree(self, category_type="all", max_depth=2):
         """
         Get a simplified tree of browser categories.
-        
+
         Args:
             category_type: Type of categories to get ('all', 'instruments', 'sounds', etc.)
-            
+            max_depth:     How many levels deep to traverse (default 2). 0 = root only.
+
         Returns:
             Dictionary with the browser tree structure
         """
@@ -1444,37 +1446,59 @@ class AbletonMCP(ControlSurface):
             app = self.application()
             if not app:
                 raise RuntimeError("Could not access Live application")
-                
+
             # Check if browser is available
             if not hasattr(app, 'browser') or app.browser is None:
                 raise RuntimeError("Browser is not available in the Live application")
-            
+
             # Log available browser attributes to help diagnose issues
             browser_attrs = [attr for attr in dir(app.browser) if not attr.startswith('_')]
             self.log_message("Available browser attributes: {0}".format(browser_attrs))
-            
+
             result = {
                 "type": category_type,
                 "categories": [],
                 "available_categories": browser_attrs
             }
-            
-            # Helper function to process a browser item and its children
+
             def process_item(item, depth=0):
-                if not item:
+                if item is None:
                     return None
-                
-                result = {
-                    "name": item.name if hasattr(item, 'name') else "Unknown",
-                    "is_folder": hasattr(item, 'children') and bool(item.children),
-                    "is_device": hasattr(item, 'is_device') and item.is_device,
-                    "is_loadable": hasattr(item, 'is_loadable') and item.is_loadable,
-                    "uri": item.uri if hasattr(item, 'uri') else None,
-                    "children": []
-                }
-                
-                
-                return result
+                try:
+                    name = item.name if hasattr(item, 'name') else "Unknown"
+                    uri  = item.uri  if hasattr(item, 'uri')  else None
+                    is_loadable = bool(getattr(item, 'is_loadable', False))
+                    is_device   = bool(getattr(item, 'is_device',   False))
+
+                    # Open the node so Ableton populates .children (lazy API)
+                    try:
+                        if hasattr(item, 'is_open'):
+                            item.is_open = True
+                    except Exception:
+                        pass
+
+                    children_data = []
+                    if depth < max_depth and hasattr(item, 'children'):
+                        try:
+                            for child in item.children:
+                                child_data = process_item(child, depth + 1)
+                                if child_data is not None:
+                                    children_data.append(child_data)
+                        except Exception as e:
+                            self.log_message(
+                                "Error traversing children of '{0}': {1}".format(name, str(e)))
+
+                    return {
+                        "name":        name,
+                        "uri":         uri,
+                        "is_loadable": is_loadable,
+                        "is_device":   is_device,
+                        "is_folder":   hasattr(item, 'children'),
+                        "children":    children_data,
+                    }
+                except Exception as e:
+                    self.log_message("Error processing browser item: {0}".format(str(e)))
+                    return None
             
             # Process based on category type and available attributes
             if (category_type == "all" or category_type == "instruments") and hasattr(app.browser, 'instruments'):
@@ -1625,6 +1649,13 @@ class AbletonMCP(ControlSurface):
                         "items": []
                     }
                 
+                # Open current node so Ableton populates .children (lazy API)
+                try:
+                    if hasattr(current_item, 'is_open'):
+                        current_item.is_open = True
+                except Exception:
+                    pass
+
                 found = False
                 for child in current_item.children:
                     if hasattr(child, 'name') and child.name.lower() == part.lower():
