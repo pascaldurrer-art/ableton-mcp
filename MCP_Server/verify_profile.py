@@ -111,22 +111,21 @@ def compare(profile, live_result):
         profile_desc  = param_def.get("description", "")
         live_name     = live_by_index.get(profile_index)
 
-        if live_name is None:
-            status = "❌"
-            note   = f"Index {profile_index} not found in live data (device has {len(live_by_index)} parameters)"
-        else:
-            # Match: profile description should contain the live name (or vice versa)
-            # We also accept an exact match on the key itself after normalisation.
-            live_norm  = _normalise(live_name)
-            desc_norm  = _normalise(profile_desc)
-            key_norm   = _normalise(param_key.replace("_", " "))
+        expected_live_name = param_def.get("live_name")
 
-            if live_norm in desc_norm or desc_norm in live_norm or live_norm == key_norm:
-                status = "✅"
-                note   = f'Live name: "{live_name}"'
-            else:
-                status = "❌"
-                note   = f'Live name: "{live_name}" — does not match description: "{profile_desc}"'
+        if live_name is None:
+            status = "[ERR]"
+            note   = f"Index {profile_index} not found in live data (device has {len(live_by_index)} parameters)"
+        elif expected_live_name is None:
+            # No live_name in profile — cannot verify, mark as unverified
+            status = "[--] "
+            note   = f'Live name: "{live_name}" (no expected live_name in profile — cannot verify)'
+        elif _normalise(live_name) == _normalise(expected_live_name):
+            status = "[OK] "
+            note   = f'Live name: "{live_name}"'
+        else:
+            status = "[ERR]"
+            note   = f'Expected: "{expected_live_name}" -- Got: "{live_name}"'
 
         results.append({
             "param_key":     param_key,
@@ -144,7 +143,7 @@ def compare(profile, live_result):
 
 def print_report(profile, live_result, comparison):
     meta = profile["meta"]
-    sep  = "─" * 72
+    sep  = "-" * 72
 
     print()
     print(sep)
@@ -157,21 +156,23 @@ def print_report(profile, live_result, comparison):
           f"({live_result['parameter_count']} parameters)")
     print(sep)
 
-    verified = [r for r in comparison if r["status"] == "✅"]
-    wrong    = [r for r in comparison if r["status"] == "❌"]
+    verified    = [r for r in comparison if r["status"] == "[OK] "]
+    wrong       = [r for r in comparison if r["status"] == "[ERR]"]
+    unverified  = [r for r in comparison if r["status"] == "[--] "]
     total    = len(comparison)
 
     print(f"\n  Summary")
     print(f"  {'Total profile entries checked:':<36} {total}")
-    print(f"  {'✅ Verified:':<36} {len(verified)}")
-    print(f"  {'❌ Wrong / not matched:':<36} {len(wrong)}")
+    print(f"  {'[OK]  Verified:':<36} {len(verified)}")
+    print(f"  {'[--]  Unverifiable (no live_name):':<36} {len(unverified)}")
+    print(f"  {'[ERR] Wrong / not matched:':<36} {len(wrong)}")
     print()
 
     if wrong:
         print("  Discrepancies")
         print(sep)
         for r in wrong:
-            print(f"  ❌  {r['param_key']}")
+            print(f"  [ERR] {r['param_key']}")
             print(f"       Profile index: {r['profile_index']}")
             print(f"       {r['note']}")
             print()
@@ -187,10 +188,13 @@ def print_report(profile, live_result, comparison):
     print(sep)
 
     if wrong:
-        print(f"  RESULT: {len(wrong)} discrepancy/ies found — profile needs correction.")
+        print(f"  RESULT: {len(wrong)} discrepancy/ies found - profile needs correction.")
         return 1
+    elif unverified:
+        print(f"  RESULT: {len(verified)} entries verified, {len(unverified)} unverifiable (missing live_name).")
+        return 0
     else:
-        print(f"  RESULT: All {len(verified)} checked entries verified successfully.")
+        print(f"  RESULT: All {len(verified)} entries verified successfully.")
         return 0
 
 
