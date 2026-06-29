@@ -226,6 +226,12 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
+            elif command_type == "get_device_parameters":
+                track_index = params.get("track_index", 0)
+                device_index = params.get("device_index", 0)
+                include_display_value = params.get("include_display_value", True)
+                limit = params.get("limit", None)
+                response["result"] = self._get_device_parameters(track_index, device_index, include_display_value, limit)
             # Commands that modify Live's state should be scheduled on the main thread
             elif command_type in ["create_midi_track", "set_track_name",
                                  "create_clip", "create_audio_clip", "add_notes_to_clip", "set_clip_name",
@@ -233,7 +239,9 @@ class AbletonMCP(ControlSurface):
                                  "start_playback", "stop_playback", "load_browser_item",
                                  # Arrangement view – must run on the main thread
                                  "switch_to_arrangement_view", "set_current_song_time",
-                                 "duplicate_session_clip_to_arrangement"]:
+                                 "duplicate_session_clip_to_arrangement",
+                                 # Device parameter write – must run on the main thread
+                                 "set_device_parameter"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -303,6 +311,14 @@ class AbletonMCP(ControlSurface):
                             destination_time = params.get("destination_time", 0.0)
                             result = self._duplicate_session_clip_to_arrangement(
                                 track_index, clip_index, destination_time)
+                        # ── Device parameter write ─────────────────────────────
+                        elif command_type == "set_device_parameter":
+                            track_index = params.get("track_index", 0)
+                            device_index = params.get("device_index", 0)
+                            parameter_index = params.get("parameter_index", 0)
+                            value = params.get("value", 0.0)
+                            result = self._set_device_parameter(
+                                track_index, device_index, parameter_index, value)
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -468,6 +484,177 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error getting track info: " + str(e))
             raise
     
+    def _get_device_parameters(self, track_index, device_index, include_display_value=True, limit=None):
+        """Return all parameters of a single device on a track.
+
+        Args:
+            track_index: Index of the track.
+            device_index: Index of the device on that track.
+            include_display_value: When True, call str_for_value() to get the
+                human-readable string with unit (e.g. "440 Hz"). Costs extra
+                time for large plugins — set False when only raw values needed.
+            limit: Maximum number of parameters to return (None = all).
+        """
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if device_index < 0 or device_index >= len(track.devices):
+                raise IndexError("Device index out of range")
+
+            device = track.devices[device_index]
+
+            parameters_raw = device.parameters
+            if limit is not None:
+                parameters_raw = parameters_raw[:limit]
+
+            parameters = []
+            for param_index, param in enumerate(parameters_raw):
+                entry = {
+                    "id": str(param_index),
+                    "index": param_index,
+                    "name": "",
+                    "value": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "is_quantized": False,
+                    "automation_state": 0,
+                    "is_enabled": True,
+                }
+                try:
+                    entry["name"] = param.name
+                except Exception as e:
+                    entry["name"] = "ERROR: " + str(e)
+                try:
+                    entry["value"] = param.value
+                except Exception as e:
+                    entry["value"] = "ERROR: " + str(e)
+                try:
+                    entry["min"] = param.min
+                except Exception as e:
+                    entry["min"] = "ERROR: " + str(e)
+                try:
+                    entry["max"] = param.max
+                except Exception as e:
+                    entry["max"] = "ERROR: " + str(e)
+                try:
+                    entry["is_quantized"] = bool(param.is_quantized)
+                except Exception:
+                    pass
+                try:
+                    entry["automation_state"] = int(param.automation_state)
+                except Exception:
+                    pass
+                try:
+                    entry["is_enabled"] = bool(param.is_enabled)
+                except Exception:
+                    pass
+                if include_display_value:
+                    try:
+                        entry["display_value"] = param.str_for_value(param.value)
+                    except Exception as e:
+                        entry["display_value"] = "ERROR: " + str(e)
+
+                parameters.append(entry)
+
+            return {
+                "track_index": track_index,
+                "track_name": track.name,
+                "device_index": device_index,
+                "device_name": device.name,
+                "device_class": device.class_name,
+                "parameter_count": len(device.parameters),
+                "returned_count": len(parameters),
+                "parameters": parameters,
+            }
+        except Exception as e:
+            self.log_message("Error getting device parameters: " + str(e))
+            raise
+
+    def _set_device_parameter(self, track_index, device_index, parameter_index, value):
+        """Set a single parameter on a device.
+
+        Validates track, device, and parameter indices, checks the value
+        against the parameter's min/max range, and rejects writes to
+        disabled (read-only) parameters before touching anything in Live.
+        """
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError(
+                    "Track index {0} out of range (0-{1})".format(
+                        track_index, len(self._song.tracks) - 1))
+
+            track = self._song.tracks[track_index]
+
+            if device_index < 0 or device_index >= len(track.devices):
+                raise IndexError(
+                    "Device index {0} out of range (0-{1}) on track '{2}'".format(
+                        device_index, len(track.devices) - 1, track.name))
+
+            device = track.devices[device_index]
+
+            if parameter_index < 0 or parameter_index >= len(device.parameters):
+                raise IndexError(
+                    "Parameter index {0} out of range (0-{1}) on device '{2}'. "
+                    "Use get_device_parameters() to see available parameters.".format(
+                        parameter_index, len(device.parameters) - 1, device.name))
+
+            param = device.parameters[parameter_index]
+
+            # Refuse writes to disabled (read-only) parameters
+            try:
+                if not param.is_enabled:
+                    raise ValueError(
+                        "Parameter '{0}' (index {1}) on device '{2}' is read-only "
+                        "and cannot be changed.".format(
+                            param.name, parameter_index, device.name))
+            except AttributeError:
+                pass  # is_enabled not available in this Live version — proceed
+
+            param_min = param.min
+            param_max = param.max
+
+            if value < param_min or value > param_max:
+                raise ValueError(
+                    "Value {0} is out of range for parameter '{1}' "
+                    "(min={2}, max={3}).".format(
+                        value, param.name, param_min, param_max))
+
+            old_value = param.value
+            param.value = float(value)
+            actual_value = param.value  # read back — Live may quantize
+
+            try:
+                display_value = param.str_for_value(actual_value)
+            except Exception:
+                display_value = str(actual_value)
+
+            try:
+                is_quantized = bool(param.is_quantized)
+            except Exception:
+                is_quantized = False
+
+            return {
+                "track_index": track_index,
+                "track_name": track.name,
+                "device_index": device_index,
+                "device_name": device.name,
+                "parameter_index": parameter_index,
+                "parameter_name": param.name,
+                "requested_value": value,
+                "actual_value": actual_value,
+                "old_value": old_value,
+                "display_value": display_value,
+                "min": param_min,
+                "max": param_max,
+                "is_quantized": is_quantized,
+            }
+        except Exception as e:
+            self.log_message("Error setting device parameter: " + str(e))
+            raise
+
     def _create_midi_track(self, index):
         """Create a new MIDI track at the specified index"""
         try:

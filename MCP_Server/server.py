@@ -6,7 +6,7 @@ import logging
 import os
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, List, Union
+from typing import AsyncIterator, Dict, Any, List, Union, Optional
 
 from .telemetry import record_startup
 from .telemetry_decorator import telemetry_tool, rich_telemetry_tool
@@ -301,6 +301,91 @@ def get_track_info(ctx: Context, track_index: int, user_prompt: str = "") -> str
     except Exception as e:
         logger.error(f"Error getting track info from Ableton: {str(e)}")
         return f"Error getting track info: {str(e)}"
+
+@mcp.tool()
+@telemetry_tool("get_device_parameters")
+def get_device_parameters(
+    ctx: Context,
+    track_index: int,
+    device_index: int,
+    include_display_value: bool = True,
+    limit: Optional[int] = None,
+    user_prompt: str = "",
+) -> str:
+    """
+    Get all parameters of a specific device on a track in Ableton.
+
+    Use get_track_info() first to find device indices. Then call this tool
+    for the device whose parameters you need. Avoid calling this for every
+    device at once — large plugins (e.g. Serum 2) can have 400+ parameters.
+
+    Parameters:
+    - track_index: Index of the track (0-based)
+    - device_index: Index of the device on that track (0-based)
+    - include_display_value: Include human-readable value string with unit
+      (e.g. "440 Hz", "-6 dB"). Default True. Set False for faster response
+      when only raw values are needed.
+    - limit: Maximum number of parameters to return. Default None (all).
+      Use e.g. limit=50 to preview a large plugin without loading everything.
+    - user_prompt: The original user prompt (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        params = {
+            "track_index": track_index,
+            "device_index": device_index,
+            "include_display_value": include_display_value,
+        }
+        if limit is not None:
+            params["limit"] = limit
+        result = ableton.send_command("get_device_parameters", params)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting device parameters from Ableton: {str(e)}")
+        return f"Error getting device parameters: {str(e)}"
+
+@mcp.tool()
+@telemetry_tool("set_device_parameter")
+def set_device_parameter(
+    ctx: Context,
+    track_index: int,
+    device_index: int,
+    parameter_index: int,
+    value: float,
+    user_prompt: str = "",
+) -> str:
+    """
+    Set a single parameter on a device in Ableton.
+
+    Use get_device_parameters() first to find the correct parameter_index,
+    the parameter name, and the allowed min/max range.
+
+    The response includes:
+    - requested_value: the value you sent
+    - actual_value: the value Live applied (may differ for quantized parameters)
+    - old_value: the value before the change
+    - display_value: human-readable string with unit (e.g. "+6.0 dB")
+    - is_quantized: True for discrete parameters (e.g. on/off, waveform type)
+
+    Parameters:
+    - track_index: Index of the track (0-based)
+    - device_index: Index of the device on that track (0-based)
+    - parameter_index: Index of the parameter on the device (0-based)
+    - value: New value (must be within the parameter's min/max range)
+    - user_prompt: The original user prompt (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_device_parameter", {
+            "track_index": track_index,
+            "device_index": device_index,
+            "parameter_index": parameter_index,
+            "value": value,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting device parameter in Ableton: {str(e)}")
+        return f"Error setting device parameter: {str(e)}"
 
 @mcp.tool()
 @telemetry_tool("create_midi_track")
