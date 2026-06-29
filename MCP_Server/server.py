@@ -388,6 +388,65 @@ def set_device_parameter(
         return f"Error setting device parameter: {str(e)}"
 
 @mcp.tool()
+@telemetry_tool("set_multiple_device_parameters")
+def set_multiple_device_parameters(
+    ctx: Context,
+    track_index: int,
+    device_index: int,
+    parameters: List[Dict[str, Any]],
+    stop_on_error: bool = True,
+    user_prompt: str = "",
+) -> str:
+    """
+    Set multiple parameters on a device in a single call.
+
+    More efficient than calling set_device_parameter repeatedly — all
+    writes happen in one main-thread pass with one socket round-trip.
+
+    Use get_device_parameters() first to find parameter indices and
+    allowed min/max ranges.
+
+    The 'parameters' list contains objects with exactly two fields:
+      - parameter_index (int): index of the parameter on the device
+      - value (float): new value, must be within min/max range
+
+    Example:
+      parameters = [
+        {"parameter_index": 7,  "value": 6.0},
+        {"parameter_index": 12, "value": 0.5}
+      ]
+
+    Error behaviour (controlled by stop_on_error):
+      - True (default): all entries are validated before any write.
+        If one entry is invalid, nothing is changed.
+      - False (best-effort): each parameter is written independently.
+        Errors are collected per entry; valid entries are still applied.
+
+    The response contains per-entry results with requested_value,
+    actual_value, old_value, display_value and is_quantized, plus
+    summary fields applied_count and error_count.
+
+    Parameters:
+    - track_index: Index of the track (0-based)
+    - device_index: Index of the device on that track (0-based)
+    - parameters: List of {parameter_index, value} objects
+    - stop_on_error: Validate all before writing (True) or best-effort (False)
+    - user_prompt: The original user prompt (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_multiple_device_parameters", {
+            "track_index":   track_index,
+            "device_index":  device_index,
+            "parameters":    parameters,
+            "stop_on_error": stop_on_error,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting multiple device parameters in Ableton: {str(e)}")
+        return f"Error setting multiple device parameters: {str(e)}"
+
+@mcp.tool()
 @telemetry_tool("create_midi_track")
 def create_midi_track(ctx: Context, index: int = -1, user_prompt: str = "") -> str:
     """

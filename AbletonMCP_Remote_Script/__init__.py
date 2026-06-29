@@ -241,7 +241,8 @@ class AbletonMCP(ControlSurface):
                                  "switch_to_arrangement_view", "set_current_song_time",
                                  "duplicate_session_clip_to_arrangement",
                                  # Device parameter write – must run on the main thread
-                                 "set_device_parameter"]:
+                                 "set_device_parameter",
+                                 "set_multiple_device_parameters"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -319,6 +320,13 @@ class AbletonMCP(ControlSurface):
                             value = params.get("value", 0.0)
                             result = self._set_device_parameter(
                                 track_index, device_index, parameter_index, value)
+                        elif command_type == "set_multiple_device_parameters":
+                            track_index = params.get("track_index", 0)
+                            device_index = params.get("device_index", 0)
+                            parameters = params.get("parameters", [])
+                            stop_on_error = params.get("stop_on_error", True)
+                            result = self._set_multiple_device_parameters(
+                                track_index, device_index, parameters, stop_on_error)
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -653,6 +661,163 @@ class AbletonMCP(ControlSurface):
             }
         except Exception as e:
             self.log_message("Error setting device parameter: " + str(e))
+            raise
+
+    def _set_multiple_device_parameters(self, track_index, device_index, parameters, stop_on_error=True):
+        """Set multiple parameters on a device in a single main-thread call.
+
+        When stop_on_error=True (default): validates every entry before
+        writing any of them. If any entry is invalid, no parameter is
+        changed and an error is returned.
+
+        When stop_on_error=False (best-effort): writes each parameter
+        individually and collects per-entry results regardless of failures.
+        """
+        try:
+            if not isinstance(parameters, list):
+                raise ValueError("'parameters' must be a list of {parameter_index, value} objects.")
+
+            if len(parameters) > 100:
+                raise ValueError(
+                    "Too many parameters: {0} entries provided, maximum is 100. "
+                    "Split your request into multiple calls if needed.".format(len(parameters)))
+
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError(
+                    "Track index {0} out of range (0-{1})".format(
+                        track_index, len(self._song.tracks) - 1))
+
+            track = self._song.tracks[track_index]
+
+            if device_index < 0 or device_index >= len(track.devices):
+                raise IndexError(
+                    "Device index {0} out of range (0-{1}) on track '{2}'".format(
+                        device_index, len(track.devices) - 1, track.name))
+
+            device = track.devices[device_index]
+            param_count = len(device.parameters)
+
+            # ── Phase 1: validate all entries before writing anything ──────
+            if stop_on_error:
+                for i, entry in enumerate(parameters):
+                    if not isinstance(entry, dict):
+                        raise ValueError(
+                            "Entry {0} is not an object. Expected {{parameter_index, value}}.".format(i))
+                    if "parameter_index" not in entry:
+                        raise ValueError("Entry {0} is missing 'parameter_index'.".format(i))
+                    if "value" not in entry:
+                        raise ValueError("Entry {0} is missing 'value'.".format(i))
+
+                    pidx = entry["parameter_index"]
+                    val  = entry["value"]
+
+                    if pidx < 0 or pidx >= param_count:
+                        raise IndexError(
+                            "Entry {0}: parameter_index {1} out of range (0-{2}) "
+                            "on device '{3}'.".format(i, pidx, param_count - 1, device.name))
+
+                    param = device.parameters[pidx]
+
+                    try:
+                        if not param.is_enabled:
+                            raise ValueError(
+                                "Entry {0}: parameter '{1}' (index {2}) is read-only.".format(
+                                    i, param.name, pidx))
+                    except AttributeError:
+                        pass
+
+                    if val < param.min or val > param.max:
+                        raise ValueError(
+                            "Entry {0}: value {1} out of range for '{2}' "
+                            "(min={3}, max={4}).".format(
+                                i, val, param.name, param.min, param.max))
+
+            # ── Phase 2: write ─────────────────────────────────────────────
+            results = []
+            success_count = 0
+            error_count   = 0
+
+            for i, entry in enumerate(parameters):
+                pidx = entry.get("parameter_index")
+                val  = entry.get("value")
+                entry_result = {
+                    "entry_index":      i,
+                    "parameter_index":  pidx,
+                    "status":           "success",
+                }
+
+                try:
+                    if not isinstance(entry, dict) or pidx is None or val is None:
+                        raise ValueError("Malformed entry.")
+                    if pidx < 0 or pidx >= param_count:
+                        raise IndexError("parameter_index {0} out of range.".format(pidx))
+
+                    param = device.parameters[pidx]
+
+                    try:
+                        if not param.is_enabled:
+                            raise ValueError("Parameter '{0}' is read-only.".format(param.name))
+                    except AttributeError:
+                        pass
+
+                    if val < param.min or val > param.max:
+                        raise ValueError(
+                            "Value {0} out of range for '{1}' (min={2}, max={3}).".format(
+                                val, param.name, param.min, param.max))
+
+                    old_value       = param.value
+                    param.value     = float(val)
+                    actual_value    = param.value
+
+                    try:
+                        display_value = param.str_for_value(actual_value)
+                    except Exception:
+                        display_value = str(actual_value)
+
+                    try:
+                        is_quantized = bool(param.is_quantized)
+                    except Exception:
+                        is_quantized = False
+
+                    entry_result.update({
+                        "parameter_name":  param.name,
+                        "requested_value": val,
+                        "actual_value":    actual_value,
+                        "old_value":       old_value,
+                        "display_value":   display_value,
+                        "min":             param.min,
+                        "max":             param.max,
+                        "is_quantized":    is_quantized,
+                    })
+                    success_count += 1
+
+                except Exception as e:
+                    entry_result["status"] = "error"
+                    entry_result["error"]  = {
+                        "error_type": type(e).__name__,
+                        "message":    str(e),
+                    }
+                    error_count += 1
+                    if stop_on_error:
+                        results.append(entry_result)
+                        break
+
+                results.append(entry_result)
+
+            return {
+                "track_index":   track_index,
+                "track_name":    track.name,
+                "device_index":  device_index,
+                "device_name":   device.name,
+                "total":         len(parameters),
+                "success_count": success_count,
+                "error_count":   error_count,
+                "stop_on_error": stop_on_error,
+                "results":       results,
+            }
+
+        except Exception as e:
+            self.log_message("Error in set_multiple_device_parameters: " + str(e))
             raise
 
     def _create_midi_track(self, index):
