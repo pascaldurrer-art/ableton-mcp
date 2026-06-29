@@ -10,6 +10,7 @@ from typing import AsyncIterator, Dict, Any, List, Union, Optional
 
 from .telemetry import record_startup
 from .telemetry_decorator import telemetry_tool, rich_telemetry_tool
+from .device_profiles import get_profile, list_profiles
 
 ABLETON_HOST = os.environ.get("ABLETON_HOST", "localhost")
 ABLETON_PORT = int(os.environ.get("ABLETON_PORT", "9877"))
@@ -343,6 +344,40 @@ def get_device_parameters(
     except Exception as e:
         logger.error(f"Error getting device parameters from Ableton: {str(e)}")
         return f"Error getting device parameters: {str(e)}"
+
+@mcp.tool()
+@telemetry_tool("get_device_profile")
+def get_device_profile(ctx: Context, class_name: str, user_prompt: str = "") -> str:
+    """
+    Return the static parameter profile for a known Ableton device.
+
+    Use this to find the human-readable parameter names and their
+    corresponding parameter_index values before calling
+    set_device_parameter or set_multiple_device_parameters.
+
+    The class_name is returned by get_track_info() in the devices list.
+    Examples: "Eq8", "Compressor2", "DrumBuss", "Saturator", "Utility".
+
+    The response includes:
+    - meta: device identification and version info
+    - capabilities: what the device supports (True/False flags)
+    - parameters: name → {index, min, max, unit, confirmed, ...}
+    - groups: logical groupings of parameters
+
+    If no profile exists for the class_name, returns the list of
+    known class_names so you can find the correct one.
+
+    Parameters:
+    - class_name: Ableton device class name (from get_track_info)
+    - user_prompt: The original user prompt (for telemetry)
+    """
+    profile = get_profile(class_name)
+    if profile is None:
+        return json.dumps({
+            "error": f"No profile found for class_name '{class_name}'.",
+            "known_class_names": list_profiles(),
+        }, indent=2)
+    return json.dumps(profile, indent=2)
 
 @mcp.tool()
 @telemetry_tool("set_device_parameter")
