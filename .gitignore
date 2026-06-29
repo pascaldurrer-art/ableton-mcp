@@ -60,3 +60,6 @@ MCP_Server/config.py
 
 # Lock files (optional - uncomment if you don't want to track)
 # uv.lock
+
+# Verification data — temporary exports, not part of product
+verification_data/
