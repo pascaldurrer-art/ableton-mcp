@@ -861,6 +861,105 @@ def get_browser_items_at_path(ctx: Context, path: str, user_prompt: str = "") ->
             return f"Error getting browser items at path: {error_msg}"
 
 @mcp.tool()
+@rich_telemetry_tool("get_device_routing_options")
+def get_device_routing_options(ctx: Context, track_index: int, device_index: int, user_prompt: str = "") -> str:
+    """
+    Get available input routing types and channels for a specific device in Ableton.
+
+    Devices like the Compressor have their OWN sidechain input routing, separate
+    from the track's input routing. Use this tool to see and configure the sidechain
+    source of a Compressor, Gate, Auto Filter, or similar device.
+
+    Workflow for sidechain setup:
+      1. Call this tool on the Compressor device to see available sources.
+      2. Find the routing_type_index for the Kick track.
+      3. Call set_device_input_routing with that index to connect the sidechain.
+      4. Enable the sidechain via set_device_parameter (S/C On = index 20).
+
+    Parameters:
+    - track_index:  Index of the track (0-based)
+    - device_index: Index of the device on that track (0-based)
+    - user_prompt:  The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_device_routing_options", {
+            "track_index":  track_index,
+            "device_index": device_index,
+        })
+
+        device_name     = result.get("device_name", f"Device {device_index}")
+        track_name      = result.get("track_name",  f"Track {track_index}")
+        current_type    = result.get("current_routing_type", {})
+        current_channel = result.get("current_routing_channel", {})
+        types    = result.get("available_routing_types", [])
+        channels = result.get("available_routing_channels", [])
+
+        out  = f"Device routing options for '{device_name}' on '{track_name}':\n\n"
+        out += f"Current routing type:    [{current_type.get('index', '?')}] {current_type.get('name', '?')}\n"
+        out += f"Current routing channel: [{current_channel.get('index', '?')}] {current_channel.get('name', '?')}\n\n"
+        out += "Available routing types:\n"
+        for t in types:
+            out += f"  [{t['index']}] {t['name']}\n"
+        if channels:
+            out += "\nAvailable routing channels (for current type):\n"
+            for c in channels:
+                out += f"  [{c['index']}] {c['name']}\n"
+        return out
+    except Exception as e:
+        logger.error(f"Error getting device routing options: {str(e)}")
+        return f"Error getting device routing options: {str(e)}"
+
+
+@mcp.tool()
+@rich_telemetry_tool("set_device_input_routing")
+def set_device_input_routing(
+    ctx: Context,
+    track_index: int,
+    device_index: int,
+    routing_type_index: int,
+    routing_channel_index: Optional[int] = None,
+    user_prompt: str = "",
+) -> str:
+    """
+    Set the input routing type (and optionally channel) for a device in Ableton.
+
+    This controls the SIDECHAIN SOURCE of devices like Compressor, Gate, and
+    Auto Filter — NOT the track's audio input. Use get_device_routing_options
+    first to discover the available indices.
+
+    Parameters:
+    - track_index:           Index of the track (0-based)
+    - device_index:          Index of the device on that track (0-based)
+    - routing_type_index:    Index from get_device_routing_options available_routing_types
+    - routing_channel_index: Optional index from available_routing_channels
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_device_input_routing", {
+            "track_index":           track_index,
+            "device_index":          device_index,
+            "routing_type_index":    routing_type_index,
+            "routing_channel_index": routing_channel_index,
+        })
+
+        device_name  = result.get("device_name", f"Device {device_index}")
+        track_name   = result.get("track_name",  f"Track {track_index}")
+        type_set     = result.get("routing_type_set", "?")
+        channel_set  = result.get("routing_channel_set")
+
+        out = f"Device routing updated for '{device_name}' on '{track_name}':\n"
+        out += f"  Routing type set to:    {type_set}\n"
+        if channel_set:
+            out += f"  Routing channel set to: {channel_set}\n"
+        return out
+    except Exception as e:
+        logger.error(f"Error setting device input routing: {str(e)}")
+        return f"Error setting device input routing: {str(e)}"
+
+
+@mcp.tool()
 @rich_telemetry_tool("get_track_routing_options")
 def get_track_routing_options(ctx: Context, track_index: int, user_prompt: str = "") -> str:
     """

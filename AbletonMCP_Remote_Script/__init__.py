@@ -244,7 +244,9 @@ class AbletonMCP(ControlSurface):
                                  "set_device_parameter",
                                  "set_multiple_device_parameters",
                                  # Track routing write – must run on the main thread
-                                 "set_track_input_routing"]:
+                                 "set_track_input_routing",
+                                 # Device routing write – must run on the main thread
+                                 "set_device_input_routing"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -335,6 +337,13 @@ class AbletonMCP(ControlSurface):
                             routing_channel_index = params.get("routing_channel_index", None)
                             result = self._set_track_input_routing(
                                 track_index, routing_type_index, routing_channel_index)
+                        elif command_type == "set_device_input_routing":
+                            track_index           = params.get("track_index", 0)
+                            device_index          = params.get("device_index", 0)
+                            routing_type_index    = params.get("routing_type_index", 0)
+                            routing_channel_index = params.get("routing_channel_index", None)
+                            result = self._set_device_input_routing(
+                                track_index, device_index, routing_type_index, routing_channel_index)
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -393,6 +402,16 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_track_routing_options":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_routing_options(track_index)
+            # Device routing – read-only, no main-thread scheduling required
+            elif command_type == "get_device_routing_options":
+                track_index  = params.get("track_index", 0)
+                device_index = params.get("device_index", 0)
+                response["result"] = self._get_device_routing_options(track_index, device_index)
+            # Diagnostic: inspect device object attributes
+            elif command_type == "get_device_routing_info":
+                track_index  = params.get("track_index", 0)
+                device_index = params.get("device_index", 0)
+                response["result"] = self._get_device_routing_info(track_index, device_index)
             else:
                 response["status"] = "error"
                 response["message"] = "Unknown command: " + command_type
@@ -1327,6 +1346,154 @@ class AbletonMCP(ControlSurface):
             return result
         except Exception as e:
             self.log_message("Error setting track input routing: " + str(e))
+            self.log_message(traceback.format_exc())
+            raise
+
+    def _get_device_routing_options(self, track_index, device_index):
+        """Return available input routing types and channels for a device (e.g. Compressor sidechain)."""
+        try:
+            track  = self._song.tracks[track_index]
+            device = track.devices[device_index]
+
+            def rt_info(i, rt):
+                try:
+                    return {"index": i, "name": rt.display_name}
+                except Exception:
+                    return {"index": i, "name": "<unknown>"}
+
+            def rc_info(i, rc):
+                try:
+                    return {"index": i, "name": rc.display_name}
+                except Exception:
+                    return {"index": i, "name": "<unknown>"}
+
+            available_types = [
+                rt_info(i, rt)
+                for i, rt in enumerate(device.available_input_routing_types)
+            ]
+
+            current_type_name  = None
+            current_type_index = None
+            try:
+                name = device.input_routing_type.display_name
+                current_type_name = name
+                for e in available_types:
+                    if e["name"] == name:
+                        current_type_index = e["index"]
+                        break
+            except Exception:
+                pass
+
+            available_channels = [
+                rc_info(i, rc)
+                for i, rc in enumerate(device.available_input_routing_channels)
+            ]
+
+            current_channel_name  = None
+            current_channel_index = None
+            try:
+                name = device.input_routing_channel.display_name
+                current_channel_name = name
+                for e in available_channels:
+                    if e["name"] == name:
+                        current_channel_index = e["index"]
+                        break
+            except Exception:
+                pass
+
+            return {
+                "track_index":              track_index,
+                "track_name":               track.name,
+                "device_index":             device_index,
+                "device_name":              device.name,
+                "device_class":             device.class_name,
+                "current_routing_type":     {"index": current_type_index,   "name": current_type_name},
+                "current_routing_channel":  {"index": current_channel_index, "name": current_channel_name},
+                "available_routing_types":    available_types,
+                "available_routing_channels": available_channels,
+            }
+        except Exception as e:
+            self.log_message("Error getting device routing options: " + str(e))
+            self.log_message(traceback.format_exc())
+            raise
+
+    def _set_device_input_routing(self, track_index, device_index, routing_type_index, routing_channel_index=None):
+        """Set the input routing type (and optionally channel) of a device (e.g. Compressor sidechain source)."""
+        try:
+            track  = self._song.tracks[track_index]
+            device = track.devices[device_index]
+
+            available_types = device.available_input_routing_types
+            if routing_type_index < 0 or routing_type_index >= len(available_types):
+                raise IndexError(
+                    "routing_type_index {0} out of range (0-{1})".format(
+                        routing_type_index, len(available_types) - 1))
+
+            chosen_type = available_types[routing_type_index]
+            device.input_routing_type = chosen_type
+            result = {
+                "track_index":        track_index,
+                "track_name":         track.name,
+                "device_index":       device_index,
+                "device_name":        device.name,
+                "routing_type_set":   chosen_type.display_name,
+                "routing_channel_set": None,
+            }
+
+            if routing_channel_index is not None:
+                available_channels = device.available_input_routing_channels
+                if routing_channel_index < 0 or routing_channel_index >= len(available_channels):
+                    raise IndexError(
+                        "routing_channel_index {0} out of range (0-{1})".format(
+                            routing_channel_index, len(available_channels) - 1))
+                chosen_channel = available_channels[routing_channel_index]
+                device.input_routing_channel = chosen_channel
+                result["routing_channel_set"] = chosen_channel.display_name
+
+            return result
+        except Exception as e:
+            self.log_message("Error setting device input routing: " + str(e))
+            self.log_message(traceback.format_exc())
+            raise
+
+    def _get_device_routing_info(self, track_index, device_index):
+        """Diagnostic: check if a device exposes input routing properties."""
+        try:
+            track = self._song.tracks[track_index]
+            device = track.devices[device_index]
+
+            all_attrs = dir(device)
+            routing_attrs = [a for a in all_attrs if 'routing' in a.lower() or 'input' in a.lower()]
+
+            result = {
+                "device_name":   device.name,
+                "device_class":  device.class_name,
+                "routing_related_attrs": routing_attrs,
+            }
+
+            # Try each routing property explicitly
+            for attr in ["available_input_routing_types",
+                         "available_input_routing_channels",
+                         "input_routing_type",
+                         "input_routing_channel"]:
+                if hasattr(device, attr):
+                    try:
+                        val = getattr(device, attr)
+                        if hasattr(val, '__iter__') and not isinstance(val, str):
+                            result[attr] = [
+                                {"index": i, "name": getattr(item, "display_name", str(item))}
+                                for i, item in enumerate(val)
+                            ]
+                        else:
+                            result[attr] = getattr(val, "display_name", str(val))
+                    except Exception as e:
+                        result[attr] = "ERROR: " + str(e)
+                else:
+                    result[attr] = "NOT_PRESENT"
+
+            return result
+        except Exception as e:
+            self.log_message("Error in get_device_routing_info: " + str(e))
             self.log_message(traceback.format_exc())
             raise
 
