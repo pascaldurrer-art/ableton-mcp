@@ -861,6 +861,102 @@ def get_browser_items_at_path(ctx: Context, path: str, user_prompt: str = "") ->
             return f"Error getting browser items at path: {error_msg}"
 
 @mcp.tool()
+@rich_telemetry_tool("get_track_routing_options")
+def get_track_routing_options(ctx: Context, track_index: int, user_prompt: str = "") -> str:
+    """
+    Get available input routing types and channels for a track in Ableton.
+
+    Returns the current routing and all selectable options. Use the returned
+    index values with set_track_input_routing to change the routing.
+
+    Covers all track types (MIDI tracks, Audio tracks, Return tracks).
+    Typical use: find which routing_type_index corresponds to a Kick track,
+    then pass it to set_track_input_routing to configure a sidechain source.
+
+    Parameters:
+    - track_index: Index of the track (0-based, includes return tracks after regular tracks)
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_track_routing_options", {
+            "track_index": track_index,
+        })
+
+        track_name = result.get("track_name", f"Track {track_index}")
+        current_type    = result.get("current_routing_type", {})
+        current_channel = result.get("current_routing_channel", {})
+        types    = result.get("available_routing_types", [])
+        channels = result.get("available_routing_channels", [])
+
+        out  = f"Track routing options for '{track_name}' (index {track_index}):\n\n"
+        out += f"Current routing type:    [{current_type.get('index', '?')}] {current_type.get('name', '?')}\n"
+        out += f"Current routing channel: [{current_channel.get('index', '?')}] {current_channel.get('name', '?')}\n\n"
+
+        out += "Available routing types:\n"
+        for t in types:
+            out += f"  [{t['index']}] {t['name']}\n"
+
+        out += "\nAvailable routing channels (for current type):\n"
+        for c in channels:
+            out += f"  [{c['index']}] {c['name']}\n"
+
+        return out
+    except Exception as e:
+        logger.error(f"Error getting track routing options: {str(e)}")
+        return f"Error getting track routing options: {str(e)}"
+
+
+@mcp.tool()
+@rich_telemetry_tool("set_track_input_routing")
+def set_track_input_routing(
+    ctx: Context,
+    track_index: int,
+    routing_type_index: int,
+    routing_channel_index: Optional[int] = None,
+    user_prompt: str = "",
+) -> str:
+    """
+    Set the input routing type (and optionally channel) for a track in Ableton.
+
+    Use get_track_routing_options first to discover the available indices.
+
+    Common use case — sidechain routing:
+      1. Call get_track_routing_options on the track that has the Compressor.
+      2. Find the routing_type_index for the Kick track (e.g. "2-Kick").
+      3. Call set_track_input_routing with that index.
+      4. Optionally pass routing_channel_index to select Pre FX / Post FX / etc.
+      5. Finally enable the Compressor sidechain with set_device_parameter (sc_on = index 20).
+
+    Parameters:
+    - track_index:           Index of the track to configure (0-based)
+    - routing_type_index:    Index from get_track_routing_options available_routing_types
+    - routing_channel_index: Optional index from available_routing_channels (e.g. Pre FX vs Post FX)
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_input_routing", {
+            "track_index":          track_index,
+            "routing_type_index":   routing_type_index,
+            "routing_channel_index": routing_channel_index,
+        })
+
+        track_name   = result.get("track_name", f"Track {track_index}")
+        type_set     = result.get("routing_type_set", "?")
+        channel_set  = result.get("routing_channel_set")
+
+        out = f"Routing updated for '{track_name}' (index {track_index}):\n"
+        out += f"  Routing type set to:    {type_set}\n"
+        if channel_set:
+            out += f"  Routing channel set to: {channel_set}\n"
+        return out
+    except Exception as e:
+        logger.error(f"Error setting track input routing: {str(e)}")
+        return f"Error setting track input routing: {str(e)}"
+
+
+@mcp.tool()
 @rich_telemetry_tool("load_drum_kit")
 def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str, user_prompt: str = "") -> str:
     """

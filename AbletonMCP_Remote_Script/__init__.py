@@ -242,7 +242,9 @@ class AbletonMCP(ControlSurface):
                                  "duplicate_session_clip_to_arrangement",
                                  # Device parameter write – must run on the main thread
                                  "set_device_parameter",
-                                 "set_multiple_device_parameters"]:
+                                 "set_multiple_device_parameters",
+                                 # Track routing write – must run on the main thread
+                                 "set_track_input_routing"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -327,6 +329,12 @@ class AbletonMCP(ControlSurface):
                             stop_on_error = params.get("stop_on_error", True)
                             result = self._set_multiple_device_parameters(
                                 track_index, device_index, parameters, stop_on_error)
+                        elif command_type == "set_track_input_routing":
+                            track_index         = params.get("track_index", 0)
+                            routing_type_index  = params.get("routing_type_index", 0)
+                            routing_channel_index = params.get("routing_channel_index", None)
+                            result = self._set_track_input_routing(
+                                track_index, routing_type_index, routing_channel_index)
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -381,6 +389,10 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_arrangement_clips":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_arrangement_clips(track_index)
+            # Track routing – read-only, no main-thread scheduling required
+            elif command_type == "get_track_routing_options":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_track_routing_options(track_index)
             else:
                 response["status"] = "error"
                 response["message"] = "Unknown command: " + command_type
@@ -1192,6 +1204,130 @@ class AbletonMCP(ControlSurface):
             }
         except Exception as e:
             self.log_message("Error duplicating clip to arrangement: " + str(e))
+            raise
+
+    # ── Track routing ─────────────────────────────────────────────────────────
+
+    def _get_track_routing_options(self, track_index):
+        """Return available input routing types and channels for a track.
+
+        Covers all track types (MIDI, Audio, Return).  The caller can pick
+        a routing_type_index and optionally a routing_channel_index, then
+        pass both to _set_track_input_routing.
+        """
+        try:
+            all_tracks = list(self._song.tracks) + list(self._song.return_tracks)
+            if track_index < 0 or track_index >= len(all_tracks):
+                raise IndexError("track_index {0} out of range (0-{1})".format(
+                    track_index, len(all_tracks) - 1))
+
+            track = all_tracks[track_index]
+
+            def routing_type_info(i, rt):
+                try:
+                    return {"index": i, "name": rt.display_name}
+                except Exception:
+                    return {"index": i, "name": "<unknown>"}
+
+            def routing_channel_info(i, rc):
+                try:
+                    return {"index": i, "name": rc.display_name}
+                except Exception:
+                    return {"index": i, "name": "<unknown>"}
+
+            available_types = [
+                routing_type_info(i, rt)
+                for i, rt in enumerate(track.available_input_routing_types)
+            ]
+
+            current_type_name = None
+            current_type_index = None
+            try:
+                current_rt = track.input_routing_type
+                current_type_name = current_rt.display_name
+                for entry in available_types:
+                    if entry["name"] == current_type_name:
+                        current_type_index = entry["index"]
+                        break
+            except Exception:
+                pass
+
+            available_channels = [
+                routing_channel_info(i, rc)
+                for i, rc in enumerate(track.available_input_routing_channels)
+            ]
+
+            current_channel_name = None
+            current_channel_index = None
+            try:
+                current_rc = track.input_routing_channel
+                current_channel_name = current_rc.display_name
+                for entry in available_channels:
+                    if entry["name"] == current_channel_name:
+                        current_channel_index = entry["index"]
+                        break
+            except Exception:
+                pass
+
+            return {
+                "track_index":           track_index,
+                "track_name":            track.name,
+                "current_routing_type":  {"index": current_type_index, "name": current_type_name},
+                "current_routing_channel": {"index": current_channel_index, "name": current_channel_name},
+                "available_routing_types":    available_types,
+                "available_routing_channels": available_channels,
+            }
+        except Exception as e:
+            self.log_message("Error getting track routing options: " + str(e))
+            self.log_message(traceback.format_exc())
+            raise
+
+    def _set_track_input_routing(self, track_index, routing_type_index, routing_channel_index=None):
+        """Set the input routing type (and optionally channel) of a track.
+
+        routing_type_index:    index into track.available_input_routing_types
+        routing_channel_index: optional index into track.available_input_routing_channels
+                               after the type has been set (channel list may change).
+        """
+        try:
+            all_tracks = list(self._song.tracks) + list(self._song.return_tracks)
+            if track_index < 0 or track_index >= len(all_tracks):
+                raise IndexError("track_index {0} out of range (0-{1})".format(
+                    track_index, len(all_tracks) - 1))
+
+            track = all_tracks[track_index]
+
+            # Set routing type
+            available_types = track.available_input_routing_types
+            if routing_type_index < 0 or routing_type_index >= len(available_types):
+                raise IndexError(
+                    "routing_type_index {0} out of range (0-{1})".format(
+                        routing_type_index, len(available_types) - 1))
+
+            chosen_type = available_types[routing_type_index]
+            track.input_routing_type = chosen_type
+            result = {
+                "track_index":       track_index,
+                "track_name":        track.name,
+                "routing_type_set":  chosen_type.display_name,
+                "routing_channel_set": None,
+            }
+
+            # Optionally set routing channel (list may have changed after type change)
+            if routing_channel_index is not None:
+                available_channels = track.available_input_routing_channels
+                if routing_channel_index < 0 or routing_channel_index >= len(available_channels):
+                    raise IndexError(
+                        "routing_channel_index {0} out of range (0-{1})".format(
+                            routing_channel_index, len(available_channels) - 1))
+                chosen_channel = available_channels[routing_channel_index]
+                track.input_routing_channel = chosen_channel
+                result["routing_channel_set"] = chosen_channel.display_name
+
+            return result
+        except Exception as e:
+            self.log_message("Error setting track input routing: " + str(e))
+            self.log_message(traceback.format_exc())
             raise
 
     # ── Browser implementations ───────────────────────────────────────────────
